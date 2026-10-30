@@ -14,6 +14,9 @@
  *
  * Protocol, client to srd, one command per line (UTF-8):
  *   S <id> <voice> <rate> <pitch> <volume> <text>   speak, replaces current
+ *   C <id> <voice> <rate> <pitch> <volume> <hex> [<text>]
+ *                                                   speak <text>, then the
+ *                                                   name of character <hex>
  *   X                                               stop
  *
  * srd to client, frames: u32 id, u32 length, then length bytes of signed
@@ -22,6 +25,7 @@
  * command arrives.
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
@@ -165,17 +169,95 @@ static int synth_callback(short *wav, int numsamples, espeak_EVENT *events)
 }
 
 
-static void speak(char *args)
+static void synth(const char *text, unsigned int flags)
 {
-	char voice[64];
-	unsigned long id;
-	int rate, pitch, volume, offset = 0;
-	char *text;
-
-	if (sscanf(args, "%lu %63s %d %d %d %n", &id, voice, &rate, &pitch, &volume, &offset) < 5 || offset == 0) {
+	if (interrupted || lost) {
 		return;
 	}
-	text = args + offset;
+	espeak_Synth(text, strlen(text) + 1, 0, POS_CHARACTER, 0, espeakCHARS_UTF8 | flags, NULL, NULL);
+}
+
+
+static size_t utf8_encode(unsigned long c, char *out)
+{
+	if (c < 0x80) {
+		out[0] = (char) c;
+		return 1;
+	}
+	if (c < 0x800) {
+		out[0] = (char) (0xc0 | (c >> 6));
+		out[1] = (char) (0x80 | (c & 0x3f));
+		return 2;
+	}
+	if (c < 0x10000) {
+		out[0] = (char) (0xe0 | (c >> 12));
+		out[1] = (char) (0x80 | ((c >> 6) & 0x3f));
+		out[2] = (char) (0x80 | (c & 0x3f));
+		return 3;
+	}
+	out[0] = (char) (0xf0 | (c >> 18));
+	out[1] = (char) (0x80 | ((c >> 12) & 0x3f));
+	out[2] = (char) (0x80 | ((c >> 6) & 0x3f));
+	out[3] = (char) (0x80 | (c & 0x3f));
+	return 4;
+}
+
+
+/* the name of a character in the current voice: letters with eSpeak's
+ * "capital" announcement, everything else spelled with SSML
+ */
+static void speak_char(unsigned long c)
+{
+	char ch[8], buf[96];
+	size_t n;
+
+	n = utf8_encode(c, ch);
+	ch[n] = '\0';
+
+	if (c >= 0x80 || isalnum((int) c)) {
+		espeak_SetParameter(espeakCAPITALS, 2, 0);
+		synth(ch, 0);
+		espeak_SetParameter(espeakCAPITALS, 0, 0);
+		return;
+	}
+
+	if (c == '<') {
+		strcpy(ch, "&lt;");
+	}
+	else if (c == '>') {
+		strcpy(ch, "&gt;");
+	}
+	else if (c == '&') {
+		strcpy(ch, "&amp;");
+	}
+	snprintf(buf, sizeof(buf), "<speak><say-as interpret-as=\"characters\">%s</say-as></speak>", ch);
+	synth(buf, espeakSSML);
+}
+
+
+static void speak(char *cmd)
+{
+	char voice[64];
+	unsigned long id, c = 0;
+	int rate, pitch, volume, offset = 0, fields;
+	char type = cmd[0];
+	char *args = cmd + 2;
+
+	if (type == 'C') {
+		fields = sscanf(args, "%lu %63s %d %d %d %lx%n", &id, voice, &rate, &pitch, &volume, &c, &offset);
+		if (fields < 6 || offset == 0) {
+			return;
+		}
+		if (args[offset] == ' ') {
+			offset++;
+		}
+	}
+	else {
+		fields = sscanf(args, "%lu %63s %d %d %d %n", &id, voice, &rate, &pitch, &volume, &offset);
+		if (fields < 5 || offset == 0) {
+			return;
+		}
+	}
 
 	current_id = (uint32_t) id;
 	last_sample = 0;
@@ -186,7 +268,12 @@ static void speak(char *args)
 	espeak_SetParameter(espeakPITCH, pitch, 0);
 	espeak_SetParameter(espeakVOLUME, volume, 0);
 
-	espeak_Synth(text, strlen(text) + 1, 0, POS_CHARACTER, 0, espeakCHARS_UTF8, NULL, NULL);
+	if (args[offset]) {
+		synth(args + offset, 0);
+	}
+	if (type == 'C') {
+		speak_char(c);
+	}
 
 	if (!interrupted && !lost) {
 		/* end of utterance */
@@ -206,8 +293,8 @@ static void handle_input(void)
 	line = inbuf;
 	while ((nl = memchr(line, '\n', inlen - (line - inbuf))) != NULL) {
 		*nl = '\0';
-		if (line[0] == 'S' && line[1] == ' ') {
-			last_speak = line + 2;
+		if ((line[0] == 'S' || line[0] == 'C') && line[1] == ' ') {
+			last_speak = line;
 		}
 		else if (line[0] == 'X') {
 			last_speak = NULL;
