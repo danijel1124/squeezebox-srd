@@ -13,7 +13,15 @@ links libraries that are not GPL compatible. srd itself is GPL-3.0-or-later.
 Client to srd, one command per line (UTF-8):
 
     S <id> <voice> <rate> <pitch> <volume> <text>   speak, replaces the current utterance
+    C <id> <voice> <rate> <pitch> <volume> <hex> <capitals> [<text>[TAB<after>]]
+                                                    speak <text>, the name of the unicode
+                                                    character <hex>, then <after>
     X                                               stop
+
+`<capitals>` is eSpeak NG's `espeakCAPITALS` for the character: 2 says the word
+"capital" in the voice's language, 3 or more raises the pitch by that amount.
+Letters are spoken as letters, other characters are spelled with SSML
+`say-as`, so they are named in the voice's language.
 
 srd to client, frames: `u32 id`, `u32 length`, then `length` bytes of signed
 16 bit mono PCM at 44100 Hz (native byte order). A frame of length 0 ends

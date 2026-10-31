@@ -14,9 +14,12 @@
  *
  * Protocol, client to srd, one command per line (UTF-8):
  *   S <id> <voice> <rate> <pitch> <volume> <text>   speak, replaces current
- *   C <id> <voice> <rate> <pitch> <volume> <hex> [<text>]
- *                                                   speak <text>, then the
- *                                                   name of character <hex>
+ *   C <id> <voice> <rate> <pitch> <volume> <hex> <capitals> [<text>[\t<after>]]
+ *                                                   speak <text>, the name of
+ *                                                   character <hex>, then <after>;
+ *                                                   capitals as eSpeak NG's
+ *                                                   espeakCAPITALS (2: the word
+ *                                                   "capital", 3 or more: pitch)
  *   X                                               stop
  *
  * srd to client, frames: u32 id, u32 length, then length bytes of signed
@@ -206,7 +209,7 @@ static size_t utf8_encode(unsigned long c, char *out)
 /* the name of a character in the current voice: letters with eSpeak's
  * "capital" announcement, everything else spelled with SSML
  */
-static void speak_char(unsigned long c)
+static void speak_char(unsigned long c, int capitals)
 {
 	char ch[8], buf[96];
 	size_t n;
@@ -215,7 +218,7 @@ static void speak_char(unsigned long c)
 	ch[n] = '\0';
 
 	if (c >= 0x80 || isalnum((int) c)) {
-		espeak_SetParameter(espeakCAPITALS, 2, 0);
+		espeak_SetParameter(espeakCAPITALS, capitals, 0);
 		synth(ch, 0);
 		espeak_SetParameter(espeakCAPITALS, 0, 0);
 		return;
@@ -239,17 +242,22 @@ static void speak(char *cmd)
 {
 	char voice[64];
 	unsigned long id, c = 0;
-	int rate, pitch, volume, offset = 0, fields;
+	int rate, pitch, volume, capitals = 2, offset = 0, fields;
 	char type = cmd[0];
 	char *args = cmd + 2;
+	char *after = NULL;
 
 	if (type == 'C') {
-		fields = sscanf(args, "%lu %63s %d %d %d %lx%n", &id, voice, &rate, &pitch, &volume, &c, &offset);
-		if (fields < 6 || offset == 0) {
+		fields = sscanf(args, "%lu %63s %d %d %d %lx %d%n", &id, voice, &rate, &pitch, &volume, &c, &capitals, &offset);
+		if (fields < 7 || offset == 0) {
 			return;
 		}
 		if (args[offset] == ' ') {
 			offset++;
+		}
+		after = strchr(args + offset, '\t');
+		if (after) {
+			*after++ = '\0';
 		}
 	}
 	else {
@@ -272,7 +280,10 @@ static void speak(char *cmd)
 		synth(args + offset, 0);
 	}
 	if (type == 'C') {
-		speak_char(c);
+		speak_char(c, capitals);
+		if (after && *after) {
+			synth(after, 0);
+		}
 	}
 
 	if (!interrupted && !lost) {
